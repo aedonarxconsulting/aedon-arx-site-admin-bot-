@@ -160,9 +160,14 @@ def new_lead():
     return {"status": "sent", "phone": phone}, 200
 
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    """Fonnte sends incoming WhatsApp messages here."""
+    """Fonnte sends incoming WhatsApp messages here (POST). Fonnte also
+    pings this URL with GET to verify it's reachable when you save the
+    webhook setting, so GET must not 405."""
+    if request.method == "GET":
+        return {"status": "webhook is up"}, 200
+
     payload = request.form if request.form else request.get_json(silent=True) or {}
 
     sender = payload.get("sender") or payload.get("phone") or payload.get("from")
