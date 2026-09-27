@@ -127,13 +127,17 @@ def build_reply(text: str) -> str:
 
 
 def send_whatsapp_reply(target: str, message: str):
-    """Send a reply back to the customer via Fonnte."""
+    """Send a reply back to the customer via Fonnte. Logs Fonnte's actual
+    response so failures (invalid number, quota, bad token) are visible in
+    the deploy logs instead of silently looking like a success."""
     headers = {"Authorization": FONNTE_TOKEN}
     data = {"target": target, "message": message}
     try:
-        requests.post(FONNTE_SEND_URL, headers=headers, data=data, timeout=15)
+        resp = requests.post(FONNTE_SEND_URL, headers=headers, data=data, timeout=15)
+        print(f"[Fonnte send] target={target} status={resp.status_code} "
+              f"response={resp.text[:300]}")
     except requests.RequestException as e:
-        print(f"[Fonnte send error] {e}")
+        print(f"[Fonnte send error] target={target} error={e}")
 
 
 @app.route("/new-lead", methods=["POST"])
