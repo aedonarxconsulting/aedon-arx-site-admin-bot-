@@ -1,0 +1,29 @@
+# Aedon Arx Consulting — WhatsApp Bot
+
+Keyword-based (no AI) WhatsApp auto-reply bot + Firestore new-lead greeter.
+
+## Files
+- `aedon_arx_bot.py` — Flask app: `/webhook` (Fonnte incoming messages), `/new-lead` (manual trigger)
+- `lead_listener.py` — background worker: watches Firestore `leads` collection, auto-greets new leads
+- `requirements.txt`, `Procfile` — deployment config
+- `.env` — your secrets (already has the Fonnte token filled in) — **never commit this file**
+
+## Setup steps
+
+1. **Push to a private repo** (not public — `.env` is git-ignored but the service account JSON must never touch git history either way).
+2. On your host (Render/Railway):
+   - Create a **web** service from `aedon_arx_bot.py` (Procfile handles this — `gunicorn aedon_arx_bot:app`)
+   - Create a **worker** service from `lead_listener.py` (Procfile: `python lead_listener.py`) — this must run continuously, separate from the web service.
+3. Set these environment variables on **both** services:
+   - `FONNTE_TOKEN` = `bQZw9qsBkNhUDPZxPsVn`
+   - `FIREBASE_CREDENTIALS_JSON` = paste the full service account JSON as one line (only needed on the worker, but fine to set on both)
+4. In Fonnte dashboard → Device → set the **webhook URL** to `https://<your-deployed-web-url>/webhook`, so incoming messages reach the bot.
+5. Confirm the Fonnte device (`Aedonarxconsulting`) is connected (green dot) — you already scanned this.
+6. Test:
+   - Send "hi" to the connected WhatsApp number → should get the greeting.
+   - Add a test document to the `leads` Firestore collection → should get an auto-greeting within seconds.
+
+## Notes
+- No AI/Groq/OpenAI key needed — pure keyword matching (`aedon_arx_bot.py` → `KEYWORDS` dict).
+- `lead_listener.py` checks multiple possible phone field names (`phone`, `whatsapp`, `mobile`, etc.) so a field-naming mismatch in the CRM won't silently break greetings.
+- If the Fonnte token or Firebase key is ever exposed publicly, revoke and regenerate immediately.
