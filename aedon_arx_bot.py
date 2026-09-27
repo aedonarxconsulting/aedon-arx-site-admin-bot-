@@ -131,7 +131,7 @@ def send_whatsapp_reply(target: str, message: str):
     response so failures (invalid number, quota, bad token) are visible in
     the deploy logs instead of silently looking like a success."""
     headers = {"Authorization": FONNTE_TOKEN}
-    data = {"target": target, "message": message}
+    data = {"target": target, "message": message, "countryCode": "91"}
     try:
         resp = requests.post(FONNTE_SEND_URL, headers=headers, data=data, timeout=15)
         print(f"[Fonnte send] target={target} status={resp.status_code} "
