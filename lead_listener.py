@@ -1,11 +1,18 @@
 """
 Aedon Arx Consulting — Firestore Lead Listener
-Watches the `leads` collection in real time. The instant a new lead document
-is created (website form, Meta Ads, or manual CRM add), it sends a WhatsApp
-greeting via Fonnte — no polling, no manual trigger needed.
+Watches the `leads` collection in real time. When a new lead document is
+created (website form, Meta Ads, or manual CRM add), it sends ONE WhatsApp
+greeting via Fonnte to that lead — never again after that, even across a
+service restart, because the greeted state is stored on the lead doc itself
+(`greeted: true`), not just in this process's memory.
+
+This only affects leads created from the moment this listener is running —
+it does not touch, re-check, or re-greet any lead that already existed
+before this version was deployed.
 
 Run this as a separate long-running process (a "worker" dyno/service),
-alongside the Flask web app in aedon_arx_bot.py.
+alongside the Flask web app in aedon_arx_bot.py — or, as set up here,
+in-process as a background thread started by aedon_arx_bot.py on boot.
 """
 
 import os
@@ -15,37 +22,28 @@ import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-from aedon_arx_bot import GREETING_REPLY, send_whatsapp_reply
+from aedon_arx_bot import greeting_reply, send_whatsapp_reply, append_to_thread
 
 # ── Firebase init ────────────────────────────────────────────────────────
-# Preferred (works on Render/Railway/etc where you can't upload a file):
-#   set FIREBASE_CREDENTIALS_JSON = the full contents of the service account JSON
-# Alternative (local / platforms that support file paths):
-#   set GOOGLE_APPLICATION_CREDENTIALS = path to the JSON file
 cred_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
 cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
-if cred_json:
-    cred = credentials.Certificate(json.loads(cred_json))
-elif cred_path:
-    cred = credentials.Certificate(cred_path)
-else:
-    raise RuntimeError(
-        "Set FIREBASE_CREDENTIALS_JSON (paste JSON content) or "
-        "GOOGLE_APPLICATION_CREDENTIALS (file path) as an env var."
-    )
+if not firebase_admin._apps:
+    if cred_json:
+        cred = credentials.Certificate(json.loads(cred_json))
+    elif cred_path:
+        cred = credentials.Certificate(cred_path)
+    else:
+        raise RuntimeError(
+            "Set FIREBASE_CREDENTIALS_JSON (paste JSON content) or "
+            "GOOGLE_APPLICATION_CREDENTIALS (file path) as an env var."
+        )
+    firebase_admin.initialize_app(cred)
 
-firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# Any of these field names is accepted as the lead's phone number — covers
-# whatever the CRM form / admin panel actually saves it as, so a naming
-# mismatch doesn't silently break the greeting.
 PHONE_FIELDS = ["phone", "whatsapp", "whatsappNumber", "mobile", "contactNumber", "number"]
 NAME_FIELDS = ["name", "fullName", "customerName"]
-
-# Prevents re-greeting the same lead if the doc is later edited/updated.
-_greeted_ids = set()
 
 
 def _extract(doc_data: dict, candidates: list):
@@ -57,9 +55,8 @@ def _extract(doc_data: dict, candidates: list):
 
 
 def _normalize_phone(raw: str) -> str:
-    """Strip formatting and ensure a country code is present (defaults to 91)."""
     digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) == 10:  # bare 10-digit Indian number, no country code
+    if len(digits) == 10:
         digits = "91" + digits
     return digits
 
@@ -70,12 +67,15 @@ def on_lead_snapshot(col_snapshot, changes, read_time):
             continue  # only fresh leads — edits/updates don't re-trigger
 
         doc = change.document
-        if doc.id in _greeted_ids:
+        data = doc.to_dict() or {}
+
+        # Persistent guard: this field lives in Firestore, so a service
+        # restart can never cause a repeat greeting for a lead already
+        # greeted before the restart.
+        if data.get("greeted") is True:
             continue
 
-        data = doc.to_dict() or {}
         phone_raw = _extract(data, PHONE_FIELDS)
-
         if not phone_raw:
             print(f"[lead-listener] Skipped {doc.id}: no phone field found "
                   f"(checked {PHONE_FIELDS}) — check the lead doc's field names.")
@@ -84,12 +84,20 @@ def on_lead_snapshot(col_snapshot, changes, read_time):
         phone = _normalize_phone(phone_raw)
         name = _extract(data, NAME_FIELDS)
 
-        greeting = GREETING_REPLY
+        greeting = greeting_reply("hi")
         if name:
-            greeting = f"Namaste {name} ji! \U0001F64F\n\n" + GREETING_REPLY
+            greeting = f"Namaste {name} ji! \U0001F64F\n\n" + greeting
 
         send_whatsapp_reply(phone, greeting)
-        _greeted_ids.add(doc.id)
+        append_to_thread(doc.reference, "bot", greeting)
+
+        # Mark it greeted immediately so nothing can send it twice, even if
+        # the process restarts a second later.
+        try:
+            doc.reference.update({"greeted": True})
+        except Exception as e:
+            print(f"[lead-listener] Could not set greeted flag on {doc.id}: {e}")
+
         print(f"[lead-listener] Greeted new lead {doc.id} -> {phone}")
 
 
