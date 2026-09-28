@@ -16,7 +16,7 @@ Keyword-based (no AI) WhatsApp auto-reply bot + Firestore new-lead greeter.
    - `lead_listener.py` runs *inside this same web service* as a background thread on app startup (no separate paid worker needed) — this is why `--workers 1` matters: with more than one gunicorn worker process, the listener would start multiple times and send duplicate greetings.
    - Free web services sleep after ~15 min of no traffic. Set up **UptimeRobot** (or similar) to ping your service URL every 5 minutes to keep it awake 24/7 — this is what keeps the Firestore listener alive continuously without paying for a worker dyno.
 3. Set these environment variables on the web service:
-   - `FONNTE_TOKEN` = `bQZw9qsBkNhUDPZxPsVn`
+   - `FONNTE_TOKEN` = `w9jEVmjmT3H9d5N6HqDd`
    - `FIREBASE_CREDENTIALS_JSON` = paste the full service account JSON as one line
 4. In Fonnte dashboard → Device → set the **webhook URL** to `https://<your-deployed-web-url>/webhook`, so incoming messages reach the bot.
 5. Confirm the Fonnte device (`Aedonarxconsulting`) is connected (green dot) — you already scanned this.
