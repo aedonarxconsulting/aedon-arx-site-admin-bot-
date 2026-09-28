@@ -11,6 +11,8 @@ switched back on.
 import os
 import re
 import json
+import time
+import threading
 import requests
 from datetime import datetime, timezone
 from flask import Flask, request
@@ -54,9 +56,46 @@ def get_db():
             cred = credentials.Certificate(cred_path)
         else:
             return None
-        firebase_admin.initialize_app(cred)
+        try:
+            firebase_admin.initialize_app(cred)
+        except ValueError:
+            pass  # already initialised by the lead listener thread
     _db = firestore.client()
     return _db
+
+
+# ── Firestore safety net ──────────────────────────────────────────────────
+# If a Firestore call hangs, the webhook must still answer the customer.
+# Calls run in a helper thread with a hard time limit; after one timeout we
+# skip Firestore for 2 minutes so replies stay instant.
+_fs_bad_until = 0.0
+
+
+def fs_call(fn, default, timeout=6):
+    global _fs_bad_until
+    if time.time() < _fs_bad_until:
+        return default
+    box = {}
+
+    def _run():
+        try:
+            box["v"] = fn()
+        except Exception as e:
+            print(f"[fs_call] error: {e}")
+            box["v"] = default
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        _fs_bad_until = time.time() + 120
+        print(f"[fs_call] Firestore call timed out after {timeout}s — skipping Firestore for 120s")
+        return default
+    return box.get("v", default)
+
+
+def fs_background(fn, *args):
+    threading.Thread(target=lambda: fs_call(lambda: fn(*args), None, 10), daemon=True).start()
 
 
 def normalize_phone(raw: str) -> str:
@@ -388,12 +427,12 @@ def webhook():
 
     phone = normalize_phone(sender)
     print(f"[webhook] from={sender} msg={message_text[:80]!r}")
-    lead_ref, lead_data = find_lead_doc(phone)
+    lead_ref, lead_data = fs_call(lambda: find_lead_doc(phone), (None, None))
     print(f"[webhook] lead_found={lead_ref is not None} ai_active={None if not lead_data else lead_data.get('ai_active')}")
 
     # Log the lead's incoming message regardless of handoff state, so staff
     # can see everything the lead said even while the bot is paused.
-    append_to_thread(lead_ref, "lead", message_text)
+    fs_background(append_to_thread, lead_ref, "lead", message_text)
 
     # ── CRM-button handoff check ──────────────────────────────────────────
     # Staff toggle ai_active=False on a lead from a button in the CRM. The
@@ -404,7 +443,7 @@ def webhook():
 
     reply = build_reply(message_text)
     send_whatsapp_reply(sender, reply)
-    append_to_thread(lead_ref, "bot", reply)
+    fs_background(append_to_thread, lead_ref, "bot", reply)
 
     return {"status": "ok"}, 200
 
@@ -414,7 +453,11 @@ def health():
     return "Aedon Arx WhatsApp bot is running.", 200
 
 
-def _maybe_start_lead_listener():
+_listener_started = False
+_listener_lock = threading.Lock()
+
+
+def _start_listener_thread():
     has_creds = os.environ.get("FIREBASE_CREDENTIALS_JSON") or os.environ.get(
         "GOOGLE_APPLICATION_CREDENTIALS"
     )
@@ -429,7 +472,19 @@ def _maybe_start_lead_listener():
         print(f"[app] Could not start lead listener: {e}")
 
 
-_maybe_start_lead_listener()
+@app.before_request
+def _ensure_listener():
+    """Start the Firestore listener inside the worker process, on the first
+    request (Render's health check hits / right after boot). Starting gRPC
+    at import time can leak it across gunicorn's fork and freeze requests."""
+    global _listener_started
+    if _listener_started:
+        return
+    with _listener_lock:
+        if _listener_started:
+            return
+        _listener_started = True
+    threading.Thread(target=_start_listener_thread, daemon=True).start()
 
 
 if __name__ == "__main__":
