@@ -76,7 +76,7 @@ def find_lead_doc(phone: str):
     leads_ref = db.collection("leads")
     for field in PHONE_FIELDS:
         try:
-            for doc in leads_ref.where(filter=FieldFilter(field, "==", phone)).limit(1).stream():
+            for doc in leads_ref.where(filter=FieldFilter(field, "==", phone)).limit(1).stream(timeout=10):
                 return doc.reference, (doc.to_dict() or {})
         except Exception as e:
             print(f"[find_lead_doc] query error on field={field}: {e}")
@@ -121,7 +121,7 @@ def append_to_thread(doc_ref, sender: str, text: str):
                 "text": text,
                 "t": datetime.now(timezone.utc).isoformat(),
             }])
-        })
+        }, timeout=10)
     except Exception as e:
         print(f"[append_to_thread] failed for sender={sender}: {e}")
 
