@@ -17,6 +17,7 @@ from flask import Flask, request
 
 import firebase_admin
 from firebase_admin import credentials, firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 app = Flask(__name__)
 
@@ -75,11 +76,34 @@ def find_lead_doc(phone: str):
     leads_ref = db.collection("leads")
     for field in PHONE_FIELDS:
         try:
-            for doc in leads_ref.where(field, "==", phone).limit(1).stream():
+            for doc in leads_ref.where(filter=FieldFilter(field, "==", phone)).limit(1).stream():
                 return doc.reference, (doc.to_dict() or {})
         except Exception as e:
             print(f"[find_lead_doc] query error on field={field}: {e}")
     return None, None
+
+
+def claim_greeting(doc_ref):
+    """Atomically set greeted=True on the lead doc. Returns True only for the
+    first caller, so the greeting can never go out twice for one lead, even
+    if the listener and /new-lead fire at the same moment."""
+    db = get_db()
+    if db is None or doc_ref is None:
+        return True
+
+    @firestore.transactional
+    def _claim(tx, ref):
+        snap = ref.get(transaction=tx)
+        if (snap.to_dict() or {}).get("greeted") is True:
+            return False
+        tx.update(ref, {"greeted": True})
+        return True
+
+    try:
+        return _claim(db.transaction(), doc_ref)
+    except Exception as e:
+        print(f"[claim_greeting] failed: {e}")
+        return True
 
 
 def append_to_thread(doc_ref, sender: str, text: str):
@@ -242,7 +266,8 @@ BOT_CHECK_WORDS = ["are you a bot", "bot ho kya", "are you real", "robot ho"]
 
 WEBSITE_TOPICS = {
     "property": ["property", "properties", "flat", "plot", "apartment", "villa",
-                 "2bhk", "3bhk", "project", "listing", "listings", "options available"],
+                 "2bhk", "3bhk", "project", "listing", "listings", "options available",
+                 "website", "link"],
     "price": ["price", "budget", "cost", "rate", "lakh", "crore", "kitna hai"],
     "amenities": ["amenities", "gym", "pool", "parking", "club", "garden"],
     "floorplan": ["floor plan", "brochure", "layout", "master plan"],
@@ -329,13 +354,21 @@ def new_lead():
     if not phone:
         return {"status": "error", "message": "phone is required"}, 400
 
+    lead_ref, _ = find_lead_doc(normalize_phone(phone))
+
+    # If Firestore is connected, the lead listener owns first greetings.
+    # Sending here too is what caused double greetings, so defer to it.
+    if get_db() is not None:
+        if lead_ref is not None and not claim_greeting(lead_ref):
+            return {"status": "already_greeted"}, 200
+        if lead_ref is None:
+            return {"status": "deferred_to_listener"}, 200
+
     greeting = greeting_reply("hi")
     if name:
         greeting = f"Namaste {name} ji! \U0001F64F\n\n" + greeting
 
     send_whatsapp_reply(phone, greeting)
-
-    lead_ref, _ = find_lead_doc(normalize_phone(phone))
     append_to_thread(lead_ref, "bot", greeting)
 
     return {"status": "sent", "phone": phone}, 200
@@ -354,7 +387,9 @@ def webhook():
         return {"status": "ignored"}, 200
 
     phone = normalize_phone(sender)
+    print(f"[webhook] from={sender} msg={message_text[:80]!r}")
     lead_ref, lead_data = find_lead_doc(phone)
+    print(f"[webhook] lead_found={lead_ref is not None} ai_active={None if not lead_data else lead_data.get('ai_active')}")
 
     # Log the lead's incoming message regardless of handoff state, so staff
     # can see everything the lead said even while the bot is paused.
