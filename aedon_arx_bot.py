@@ -24,8 +24,8 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
-# Test token (MediSoft device 8235370808). Render env var FONNTE_TOKEN overrides this.
-FONNTE_TOKEN = os.environ.get("FONNTE_TOKEN", "w9jEVmjmT3H9d5N6HqDd")
+# Official token (device 9953913605). Render env var FONNTE_TOKEN overrides this.
+FONNTE_TOKEN = os.environ.get("FONNTE_TOKEN", "E9jhH27fQjDbkfgPMH9P")
 FONNTE_SEND_URL = "https://api.fonnte.com/send"
 
 COMPANY_NAME = "Aedon Arx Consulting"
