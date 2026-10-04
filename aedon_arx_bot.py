@@ -94,6 +94,37 @@ def fs_call(fn, default, timeout=6):
     return box.get("v", default)
 
 
+# ── Global ON/OFF switch (set from the CRM toggle) ─────────────────────────
+# Only affects replies to incoming messages (/webhook). New leads ALWAYS get
+# their first greeting, whether the switch is ON or OFF.
+# The CRM writes settings/bot -> {"enabled": true|false}. Missing doc or
+# missing field means ON. The value is cached for a few seconds so every
+# message does not cost a Firestore read, but a CRM toggle still takes
+# effect almost immediately.
+_bot_state = {"enabled": True, "at": 0.0}
+BOT_SWITCH_CACHE_SECONDS = 8
+
+
+def bot_enabled() -> bool:
+    now = time.time()
+    if now - _bot_state["at"] < BOT_SWITCH_CACHE_SECONDS:
+        return _bot_state["enabled"]
+
+    def _read():
+        db = get_db()
+        if db is None:
+            return True
+        doc = db.collection("settings").document("bot").get()
+        if not doc.exists:
+            return True
+        return (doc.to_dict() or {}).get("enabled") is not False
+
+    enabled = fs_call(_read, True, 4)
+    _bot_state["enabled"] = enabled
+    _bot_state["at"] = now
+    return enabled
+
+
 def fs_background(fn, *args):
     threading.Thread(target=lambda: fs_call(lambda: fn(*args), None, 10), daemon=True).start()
 
@@ -433,6 +464,12 @@ def webhook():
     # Log the lead's incoming message regardless of handoff state, so staff
     # can see everything the lead said even while the bot is paused.
     fs_background(append_to_thread, lead_ref, "lead", message_text)
+
+    # ── Global CRM switch: when the bot is OFF it never replies to anyone ──
+    # (the lead's message above is still saved to the thread for staff).
+    if not bot_enabled():
+        print("[webhook] bot is OFF (CRM switch) — staying silent.")
+        return {"status": "bot_off"}, 200
 
     # ── CRM-button handoff check ──────────────────────────────────────────
     # Staff toggle ai_active=False on a lead from a button in the CRM. The
