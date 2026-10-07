@@ -220,11 +220,42 @@ def detect_language(text: str) -> str:
     return "en"
 
 
+# ── Language choice (lead picks Hindi or English after first greeting) ───
+def detect_language_choice(text: str):
+    """Returns 'en' or 'hi' if the message is the lead picking a language,
+    else None. Only short messages count, so a normal sentence that happens
+    to contain the word 'english' is not treated as a choice."""
+    cleaned = re.sub(r"[^\w\u0900-\u097F\s]", " ", text.lower())
+    words = cleaned.split()
+    if not words or len(words) > 3:
+        return None
+    if any(w in ("english", "inglish", "angrezi", "अंग्रेजी", "अंग्रेज़ी") for w in words):
+        return "en"
+    if any(w in ("hindi", "हिंदी", "हिन्दी") for w in words):
+        return "hi"
+    return None
+
+
+def save_language(doc_ref, lang: str):
+    if doc_ref is None:
+        return
+    try:
+        doc_ref.update({"language": lang})
+    except Exception as e:
+        print(f"[save_language] failed: {e}")
+
+
+def assist_reply(lang):
+    if lang == "hi":
+        return "Main aapki kaise madad kar sakti hoon?"
+    return "How can I assist you?"
+
+
 # ── Reply templates ───────────────────────────────────────────────────────
 def greeting_reply(lang):
     if lang == "hi":
-        return (f"Namaste! {COMPANY_NAME} mein aapka swagat hai — '{TAGLINE}'. "
-                f"Aapki kaise madad kar sakte hain?")
+        return (f"Namaste! Welcome to {COMPANY_NAME}, '{TAGLINE}'. "
+                f"Which language would you prefer, Hindi or English?")
     return (f"Hello! Welcome to {COMPANY_NAME} — '{TAGLINE}'. "
             f"How can we help you today?")
 
@@ -378,10 +409,12 @@ def match_topic(t):
     return None
 
 
-def build_reply(text: str) -> str:
+def build_reply(text: str, lang_pref=None) -> str:
     """Priority order: are-you-a-bot -> thanks/bye -> greeting -> topic
-    intents -> fallback. (Handoff isn't decided here — see webhook().)"""
-    lang = detect_language(text)
+    intents -> fallback. (Handoff isn't decided here — see webhook().)
+    lang_pref is the language the lead chose ('en' or 'hi'); when set, every
+    reply uses it instead of guessing from the message."""
+    lang = lang_pref or detect_language(text)
     t = f" {text.lower().strip()} "
 
     if _contains_any(t, BOT_CHECK_WORDS):
@@ -391,7 +424,7 @@ def build_reply(text: str) -> str:
     if _contains_any(t, BYE_WORDS):
         return bye_reply(lang)
     if _contains_any(t, GREETING_WORDS):
-        return greeting_reply(lang)
+        return assist_reply(lang_pref) if lang_pref else greeting_reply(lang)
 
     topic = match_topic(t)
     if topic:
@@ -478,7 +511,14 @@ def webhook():
         print(f"[webhook] ai_active=False for {phone} — staying silent (staff handling).")
         return {"status": "handoff_active"}, 200
 
-    reply = build_reply(message_text)
+    # ── Language choice: lead picked Hindi or English ─────────────────────
+    choice = detect_language_choice(message_text)
+    if choice:
+        reply = assist_reply(choice)
+        fs_background(save_language, lead_ref, choice)
+    else:
+        saved = (lead_data or {}).get("language")
+        reply = build_reply(message_text, saved if saved in ("en", "hi") else None)
     send_whatsapp_reply(sender, reply)
     fs_background(append_to_thread, lead_ref, "bot", reply)
 
