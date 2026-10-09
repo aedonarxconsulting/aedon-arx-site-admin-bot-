@@ -437,7 +437,10 @@ def build_reply(text: str, lang_pref=None) -> str:
 
 
 # ── AI replies (Groq) ─────────────────────────────────────────────────────
-# GROQ_API_KEY is read from the environment only. Never hard-code it here.
+# API keys are read from the environment only. Never hard-code them here.
+# Gemini is used when GEMINI_API_KEY is set, otherwise Groq when GROQ_API_KEY is set.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -582,47 +585,102 @@ def clean_ai_text(t):
     return t[:1500].strip()
 
 
+def _call_gemini(system, history, text):
+    # Gemini wants alternating user / model turns that start with the user
+    turns = []
+    for m in history + [{"role": "user", "content": text}]:
+        role = "model" if m["role"] == "assistant" else "user"
+        if turns and turns[-1]["role"] == role:
+            turns[-1]["parts"][0]["text"] += "\n" + m["content"]
+        else:
+            turns.append({"role": role, "parts": [{"text": m["content"]}]})
+    while turns and turns[0]["role"] == "model":
+        turns.pop(0)
+    resp = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+        headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+        json={
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": turns,
+            "generationConfig": {"temperature": 0.4, "maxOutputTokens": 900},
+        },
+        timeout=25,
+    )
+    if resp.status_code != 200:
+        print(f"[ai_reply] Gemini HTTP {resp.status_code}: {resp.text[:300]}")
+        return None
+    cands = resp.json().get("candidates") or []
+    parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
+    return "".join(p.get("text", "") for p in parts)
+
+
+def _call_groq(system, history, text):
+    resp = requests.post(
+        GROQ_URL,
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        json={"model": GROQ_MODEL,
+              "messages": [{"role": "system", "content": system}] + history + [{"role": "user", "content": text}],
+              "temperature": 0.4, "max_tokens": 450},
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        print(f"[ai_reply] Groq HTTP {resp.status_code}: {resp.text[:300]}")
+        return None
+    return resp.json()["choices"][0]["message"]["content"]
+
+
 def ai_reply(text, lead_data, lang_pref):
-    """Ask Groq for the reply. Returns None on any problem so the caller falls back
+    """Ask the AI for the reply. Returns None on any problem so the caller falls back
     to the keyword replies and the customer never gets silence."""
-    if not GROQ_API_KEY:
+    if not (GEMINI_API_KEY or GROQ_API_KEY):
         return None
     try:
         props = select_properties(text, load_properties())
         props_text = "\n\n".join(property_brief(p) for p in props)
         lead_data = lead_data or {}
         name = next((str(lead_data[f]).strip() for f in NAME_FIELDS if lead_data.get(f)), "")
-        messages = [{"role": "system", "content": build_system_prompt(lang_pref, name, props_text)}]
-        messages += thread_to_history(lead_data.get("thread"), text)
-        messages.append({"role": "user", "content": text[:1500]})
-        resp = requests.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": GROQ_MODEL, "messages": messages, "temperature": 0.4, "max_tokens": 450},
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            print(f"[ai_reply] Groq HTTP {resp.status_code}: {resp.text[:300]}")
-            return None
-        out = clean_ai_text(resp.json()["choices"][0]["message"]["content"])
-        return out or None
+        system = build_system_prompt(lang_pref, name, props_text)
+        history = thread_to_history(lead_data.get("thread"), text)
+        text = text[:1500]
+        raw = _call_gemini(system, history, text) if GEMINI_API_KEY else _call_groq(system, history, text)
+        return clean_ai_text(raw) or None
     except Exception as e:
         print(f"[ai_reply] failed: {e}")
         return None
+
+
+# Short in-memory conversation per phone, used when the number is not a lead in Firestore
+_mem = {}
+
+
+def _mem_entry(phone):
+    now = time.time()
+    for k in [k for k, v in _mem.items() if now - v["at"] > 6 * 3600]:
+        _mem.pop(k, None)
+    e = _mem.setdefault(phone, {"at": now, "thread": [], "lang": None})
+    e["at"] = now
+    return e
 
 
 def handle_incoming(sender, message_text, lead_ref, lead_data):
     """Work out the reply and send it. Runs in a background thread so the
     webhook can answer Fonnte immediately."""
     try:
+        mem = _mem_entry(sender)
+        data = dict(lead_data or {})
+        if not data.get("thread"):
+            data["thread"] = list(mem["thread"])
         choice = detect_language_choice(message_text)
         if choice:
+            mem["lang"] = choice
             reply = assist_reply(choice)
             fs_background(save_language, lead_ref, choice)
         else:
-            saved = (lead_data or {}).get("language")
+            saved = data.get("language") or mem["lang"]
             pref = saved if saved in ("en", "hi") else None
-            reply = ai_reply(message_text, lead_data, pref) or build_reply(message_text, pref)
+            reply = ai_reply(message_text, data, pref) or build_reply(message_text, pref)
+        mem["thread"] = (mem["thread"] + [{"from": "lead", "text": message_text},
+                                          {"from": "bot", "text": reply}])[-20:]
         send_whatsapp_reply(sender, reply)
         fs_background(append_to_thread, lead_ref, "bot", reply)
     except Exception as e:

@@ -18,8 +18,10 @@ AI WhatsApp reply bot (Groq) that answers from the live Firestore `properties` d
 3. Set these environment variables on the web service:
    - `FONNTE_TOKEN` = your Fonnte device token
    - `FIREBASE_CREDENTIALS_JSON` = paste the full service account JSON as one line
-   - `GROQ_API_KEY` = your Groq API key (from console.groq.com). Without it the bot falls back to the old keyword replies.
-   - `GROQ_MODEL` = optional, defaults to `llama-3.3-70b-versatile`
+   - `GEMINI_API_KEY` = your Google Gemini API key (from aistudio.google.com). The bot uses Gemini when this is set.
+   - `GEMINI_MODEL` = optional, defaults to `gemini-3.1-flash-lite`
+   - (optional alternative) `GROQ_API_KEY` and `GROQ_MODEL`: used only when `GEMINI_API_KEY` is not set
+   - Without any AI key the bot falls back to the old keyword replies.
 4. In Fonnte dashboard → Device → set the **webhook URL** to `https://<your-deployed-web-url>/webhook`, so incoming messages reach the bot.
 5. Confirm the Fonnte device (`Aedonarxconsulting`) is connected (green dot) — you already scanned this.
 6. Test:
