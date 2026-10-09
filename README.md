@@ -1,6 +1,6 @@
 # Aedon Arx Consulting — WhatsApp Bot
 
-Keyword-based (no AI) WhatsApp auto-reply bot + Firestore new-lead greeter.
+AI WhatsApp reply bot (Groq) that answers from the live Firestore `properties` data, with the old keyword replies as an automatic fallback, plus a Firestore new-lead greeter.
 
 ## Files
 - `aedon_arx_bot.py` — Flask app: `/webhook` (Fonnte incoming messages), `/new-lead` (manual trigger)
@@ -16,8 +16,10 @@ Keyword-based (no AI) WhatsApp auto-reply bot + Firestore new-lead greeter.
    - `lead_listener.py` runs *inside this same web service* as a background thread on app startup (no separate paid worker needed) — this is why `--workers 1` matters: with more than one gunicorn worker process, the listener would start multiple times and send duplicate greetings.
    - Free web services sleep after ~15 min of no traffic. Set up **UptimeRobot** (or similar) to ping your service URL every 5 minutes to keep it awake 24/7 — this is what keeps the Firestore listener alive continuously without paying for a worker dyno.
 3. Set these environment variables on the web service:
-   - `FONNTE_TOKEN` = `w9jEVmjmT3H9d5N6HqDd`
+   - `FONNTE_TOKEN` = your Fonnte device token
    - `FIREBASE_CREDENTIALS_JSON` = paste the full service account JSON as one line
+   - `GROQ_API_KEY` = your Groq API key (from console.groq.com). Without it the bot falls back to the old keyword replies.
+   - `GROQ_MODEL` = optional, defaults to `llama-3.3-70b-versatile`
 4. In Fonnte dashboard → Device → set the **webhook URL** to `https://<your-deployed-web-url>/webhook`, so incoming messages reach the bot.
 5. Confirm the Fonnte device (`Aedonarxconsulting`) is connected (green dot) — you already scanned this.
 6. Test:
